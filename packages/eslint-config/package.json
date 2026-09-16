@@ -1,0 +1,12 @@
+{
+  "name": "@freight-maven/eslint-config",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "dependencies": {
+    "eslint": "^9.39.1"
+  }
+}

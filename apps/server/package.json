@@ -1,0 +1,49 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FreightMaven API and worker",
+  "type": "module",
+  "main": "dist/app/api.js",
+  "scripts": {
+    "dev": "tsx watch src/app/api.ts",
+    "dev:worker": "tsx watch src/app/worker.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/app/api.js",
+    "start:worker": "node dist/app/worker.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint eslint.config.js && tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "db:generate": "drizzle-kit generate --config drizzle.config.ts",
+    "db:migrate": "tsx src/infrastructure/db/migrate.ts"
+  },
+  "dependencies": {
+    "@freight-maven/database": "workspace:*",
+    "@freight-maven/env": "workspace:*",
+    "@freight-maven/observability": "workspace:*",
+    "@freight-maven/shared": "workspace:*",
+    "@fastify/sensible": "^6.0.5",
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.208.0",
+    "@opentelemetry/resources": "^2.3.0",
+    "@opentelemetry/sdk-node": "^0.208.0",
+    "@opentelemetry/semantic-conventions": "^1.38.0",
+    "drizzle-orm": "^0.44.7",
+    "fastify": "^5.6.1",
+    "ioredis": "^5.8.2",
+    "pg-boss": "^12.5.0",
+    "pino": "^9.14.0",
+    "postgres": "^3.4.7",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "drizzle-kit": "^0.31.5",
+    "eslint": "^9.39.1",
+    "testcontainers": "^11.7.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

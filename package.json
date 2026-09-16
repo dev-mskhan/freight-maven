@@ -1,10 +1,15 @@
 {
   "name": "freight-maven",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "FreightMaven modular monolith foundation",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "pnpm --filter server dev",
+    "build": "pnpm --filter server build",
+    "start": "pnpm --filter server start",
+    "typecheck": "pnpm --filter server typecheck",
+    "lint": "pnpm --filter server lint",
+    "test": "pnpm --filter server test",
+    "test:integration": "pnpm --filter server test:integration"
   },
   "keywords": [],
   "author": "",
@@ -12,7 +17,7 @@
   "devEngines": {
     "packageManager": {
       "name": "pnpm",
-      "version": "^11.9.0",
+      "version": "11.26.0",
       "onFail": "download"
     }
   },

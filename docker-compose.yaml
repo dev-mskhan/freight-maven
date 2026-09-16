@@ -1,0 +1,270 @@
+# FreightMaven local development services
+#
+# Default: PostgreSQL, Redis, and MinIO
+# App:      docker compose --profile app up -d
+# Pooling:  docker compose --profile pooling up -d
+# Tracing:  docker compose --profile observability up -d
+# All:      docker compose --profile app --profile pooling --profile observability up -d
+
+networks:
+  freight-maven-net:
+    driver: bridge
+  signoz-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  signoz_data:
+  clickhouse_data:
+  zookeeper_data:
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: freight-maven-postgres
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-freightmaven}
+      POSTGRES_USER: ${POSTGRES_USER:-freightmaven}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-freightmaven}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/docker/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./infra/docker/postgres/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    networks:
+      - freight-maven-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-freightmaven} -d ${POSTGRES_DB:-freightmaven}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  pgbouncer:
+    profiles: ["pooling"]
+    image: edoburu/pgbouncer:latest
+    container_name: freight-maven-pgbouncer
+    environment:
+      DB_USER: ${POSTGRES_USER:-freightmaven}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-freightmaven}
+      DB_NAME: ${POSTGRES_DB:-freightmaven}
+      DB_HOST: postgres
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 200
+      DEFAULT_POOL_SIZE: 20
+    ports:
+      - "${PGBOUNCER_PORT:-6432}:5432"
+    networks:
+      - freight-maven-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER:-freightmaven} -d ${POSTGRES_DB:-freightmaven}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: freight-maven-redis
+    command: redis-server /etc/redis/redis.conf
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+      - ./infra/docker/redis/redis.conf:/etc/redis/redis.conf:ro
+    networks:
+      - freight-maven-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: freight-maven-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - freight-maven-net
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio-create-buckets:
+    image: minio/mc:latest
+    container_name: freight-maven-minio-init
+    networks:
+      - freight-maven-net
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing local/freight-maven-documents
+        mc anonymous set download local/freight-maven-documents
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    restart: "no"
+
+  server:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    container_name: freight-maven-server
+    environment:
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-freightmaven}:${POSTGRES_PASSWORD:-freightmaven}@postgres:5432/${POSTGRES_DB:-freightmaven}
+      REDIS_URL: redis://redis:6379
+      PG_BOSS_SCHEMA: pgboss
+      OTEL_SERVICE_NAME: freight-maven-api
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    networks:
+      - freight-maven-net
+      - signoz-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    container_name: freight-maven-worker
+    command: ["node", "dist/app/worker.js"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://${POSTGRES_USER:-freightmaven}:${POSTGRES_PASSWORD:-freightmaven}@postgres:5432/${POSTGRES_DB:-freightmaven}
+      REDIS_URL: redis://redis:6379
+      PG_BOSS_SCHEMA: pgboss
+      OTEL_SERVICE_NAME: freight-maven-worker
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    networks:
+      - freight-maven-net
+      - signoz-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  zookeeper:
+    profiles: ["observability"]
+    image: signoz/zookeeper:3.7.1
+    container_name: freight-maven-signoz-zookeeper
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+      ZOO_AUTOPURGE_INTERVAL: "1"
+    volumes:
+      - zookeeper_data:/bitnami/zookeeper
+    networks:
+      - signoz-net
+    restart: unless-stopped
+
+  clickhouse:
+    profiles: ["observability"]
+    image: clickhouse/clickhouse-server:25.5.6
+    container_name: freight-maven-signoz-clickhouse
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./infra/docker/clickhouse/listen.xml:/etc/clickhouse-server/config.d/listen.xml:ro
+    networks:
+      - signoz-net
+    depends_on:
+      zookeeper:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  otel-collector:
+    profiles: ["observability"]
+    image: signoz/signoz-otel-collector:v0.129.6
+    container_name: freight-maven-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    ports:
+      - "${OTLP_GRPC_PORT:-4317}:4317"
+      - "${OTLP_HTTP_PORT:-4318}:4318"
+    volumes:
+      - ./infra/docker/otel-collector/config.yaml:/etc/otel-collector-config.yaml:ro
+    networks:
+      - freight-maven-net
+      - signoz-net
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  signoz:
+    profiles: ["observability"]
+    image: signoz/signoz:v0.128.0
+    container_name: freight-maven-signoz
+    environment:
+      SIGNOZ_ALERTMANAGER_PROVIDER: signoz
+      SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN: tcp://clickhouse:9000
+      SIGNOZ_SQLSTORE_SQLITE_PATH: /var/lib/signoz/signoz.db
+      SIGNOZ_TOKENIZER_JWT_SECRET: ${SIGNOZ_JWT_SECRET:-freight-maven-local-secret}
+    ports:
+      - "${SIGNOZ_PORT:-3301}:8080"
+    volumes:
+      - signoz_data:/var/lib/signoz
+    networks:
+      - signoz-net
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
